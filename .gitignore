@@ -10,3 +10,6 @@ node_modules/
 npm-debug.log*
 *.log
 files.zip
+
+# Cookies YouTube — bi mat
+cookies.txt

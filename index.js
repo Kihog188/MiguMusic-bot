@@ -80,12 +80,22 @@ function isYoutubeUrl(text) {
   return /^https?:\/\/(www\.|music\.|m\.)?(youtube\.com|youtu\.be)\//i.test((text || '').trim());
 }
 
+// Tuỳ chọn chung cho mọi lần gọi yt-dlp.
+// - jsRuntimes: dùng Node có sẵn để giải n-challenge của YouTube (không có sẽ bị 403 khi tải)
+// - cookies: đặt YTDL_COOKIES=đường/dẫn/cookies.txt trong .env khi host bị YouTube chặn IP
+//   (VPS/cloud). Chạy ở máy cá nhân thì không cần.
+const YTDLP_BASE = {
+  noWarnings: true,
+  jsRuntimes: 'node',
+  ...(process.env.YTDL_COOKIES ? { cookies: process.env.YTDL_COOKIES } : {}),
+};
+
 // Tìm bài hát từ từ khoá nếu không phải link
 async function resolveSong(input) {
   if (isYoutubeUrl(input)) {
     const info = await ytdlp(input, {
+      ...YTDLP_BASE,
       dumpSingleJson: true,
-      noWarnings: true,
       noPlaylist: true,
       skipDownload: true,
     });
@@ -109,9 +119,9 @@ async function resolveTracks(input) {
   if (isYoutubeUrl(input) && isPlaylistUrl(input)) {
     try {
       const info = await ytdlp(input, {
+        ...YTDLP_BASE,
         dumpSingleJson: true,
         flatPlaylist: true,
-        noWarnings: true,
         skipDownload: true,
       });
       const entries = Array.isArray(info?.entries) ? info.entries : [];
@@ -202,16 +212,21 @@ async function playNext(guildId) {
   const ytProcess = ytdlp.exec(
     song.url,
     {
+      ...YTDLP_BASE,
       output: '-',
-      format: 'bestaudio[ext=webm]/bestaudio/best',
+      format: 'bestaudio[ext=webm]/bestaudio',
       quiet: true,
-      noWarnings: true,
       noPlaylist: true,
     },
-    { stdio: ['ignore', 'pipe', 'ignore'] },
+    { stdio: ['ignore', 'pipe', 'pipe'] },
   );
-  // Tránh unhandled rejection khi tiến trình bị kill (skip/stop) hoặc yt-dlp lỗi.
-  ytProcess.catch(() => {});
+  // Tránh unhandled rejection khi tiến trình bị kill (skip/stop). Nếu yt-dlp tự lỗi
+  // (403, video riêng tư, bị chặn IP...) thì in dòng lỗi cuối để không "im lặng".
+  ytProcess.catch((err) => {
+    if (err?.isTerminated || err?.signal) return;
+    const lastLine = (err?.stderr || '').trim().split('\n').pop();
+    console.error(`yt-dlp lỗi khi phát "${song.title}":`, lastLine || err?.shortMessage || err?.message);
+  });
 
   // 2) ffmpeg nhận audio từ yt-dlp, áp bộ lọc (nếu có), xuất PCM 48kHz stereo.
   //    @discordjs/voice (opusscript) sẽ tự encode Opus và căn nhịp 20ms chính xác
