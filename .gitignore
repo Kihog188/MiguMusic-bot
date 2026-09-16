@@ -1,0 +1,12 @@
+# Bí mật — KHÔNG BAO GIỜ đưa lên GitHub
+.env
+.env.*
+!.env.example
+
+# Dependencies (host sẽ tự cài lại)
+node_modules/
+
+# Log & tạm
+npm-debug.log*
+*.log
+files.zip
