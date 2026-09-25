@@ -9,6 +9,7 @@
     "deploy": "node deploy-commands.js"
   },
   "dependencies": {
+    "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
     "@distube/ytdl-core": "^4.14.4",
     "@noble/ciphers": "^2.4.0",
