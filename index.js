@@ -338,10 +338,21 @@ function buildQueuePage(queue, page) {
   return { embed, row, totalPages, current };
 }
 
+// Interaction đã hết hạn (quá 3 giây) hoặc đã được trả lời rồi. Cả hai trường hợp
+// đều không thể gửi thêm gì nữa, nên đừng thử lại cho rác log.
+const DEAD_INTERACTION_CODES = new Set([10062, 40060]);
+const isDeadInteraction = (err) => DEAD_INTERACTION_CODES.has(err?.code);
+
 client.on('interactionCreate', async (interaction) => {
   try {
     await handleInteraction(interaction);
   } catch (err) {
+    if (isDeadInteraction(err)) {
+      const name = interaction.isChatInputCommand() ? `/${interaction.commandName}` : 'interaction';
+      console.warn(`${name}: Discord đã đóng interaction trước khi bot kịp trả lời (code ${err.code}).`);
+      return;
+    }
+
     console.error('Lỗi xử lý lệnh:', err);
     try {
       if (interaction.isRepliable()) {
@@ -353,6 +364,7 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
     } catch (e2) {
+      if (isDeadInteraction(e2)) return;
       console.error('Không thể gửi thông báo lỗi:', e2);
     }
   }
@@ -542,11 +554,14 @@ async function handleInteraction(interaction) {
 
     // Nếu đang phát -> phát lại bài hiện tại với hiệu ứng mới (bài sẽ bắt đầu lại từ đầu)
     if (queue.playing && queue.songs[0]) {
+      // playNext() spawn yt-dlp + ffmpeg, có thể lâu hơn cửa sổ 3 giây của Discord
+      // -> phải báo nhận trước, nếu không interaction hết hạn (lỗi 10062)
+      await interaction.deferReply();
       const oldYt = queue.currentProcess;
       const oldFf = queue.currentFfmpeg;
       await playNext(guild.id); // player.play() thay resource mới -> không kích hoạt shift
       killProcs(oldYt, oldFf); // dọn tiến trình cũ sau khi đã chuyển sang resource mới
-      return interaction.reply(`🎛️ Đã đổi hiệu ứng: **${label}** — phát lại bài hiện tại.`);
+      return interaction.editReply(`🎛️ Đã đổi hiệu ứng: **${label}** — phát lại bài hiện tại.`);
     }
     return interaction.reply(`🎛️ Đã đặt hiệu ứng: **${label}** — áp dụng cho bài kế tiếp.`);
   }
