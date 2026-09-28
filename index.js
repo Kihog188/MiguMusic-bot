@@ -13,6 +13,8 @@ const {
 const { Shoukaku, Connectors, LoadType } = require('shoukaku');
 const ytdlp = require('youtube-dl-exec');
 const ytSearch = require('yt-search');
+const fs = require('fs');
+const path = require('path');
 
 // Các bộ lọc âm thanh của Lavalink. key = giá trị chọn trong lệnh /filter.
 // Lavalink áp filter trực tiếp lên bài đang phát, không cần phát lại từ đầu.
@@ -181,21 +183,39 @@ async function resolveTracks(input) {
   return resolveTracksYtdlp(text);
 }
 
-// yt-dlp (có cookies) lấy link audio trực tiếp của YouTube, rồi đưa link đó cho Lavalink
-// phát qua nguồn HTTP. Link googlevideo gắn với IP nên Lavalink phải chạy cùng máy với bot.
+// Thư mục chứa file audio yt-dlp tải về. Lavalink đọc file ở đây qua nguồn `local`,
+// nên Lavalink phải chạy cùng máy và cùng user với bot.
+const AUDIO_DIR = path.resolve(process.env.AUDIO_CACHE_DIR || path.join(__dirname, 'cache'));
+fs.rmSync(AUDIO_DIR, { recursive: true, force: true }); // file sót lại từ lần chạy trước
+fs.mkdirSync(AUDIO_DIR, { recursive: true });
+
+function dropFile(song) {
+  if (!song?.file) return;
+  fs.rm(song.file, { force: true }, () => {});
+  song.file = null;
+}
+
+// yt-dlp (có cookies) tự tải audio YouTube về ổ đĩa, rồi Lavalink phát file đó.
+// Không đưa link googlevideo cho Lavalink được: YouTube trả 403 vì Lavalink không gửi
+// kèm header/token như yt-dlp.
 async function encodeViaYtdlp(node, song) {
   const out = await ytdlp(song.url, {
     ...YTDLP_BASE,
-    getUrl: true,
     format: 'bestaudio[ext=webm]/bestaudio',
+    output: path.join(AUDIO_DIR, `${Date.now()}-%(id)s.%(ext)s`),
+    print: 'after_move:filepath',
+    noSimulate: true,
     noPlaylist: true,
+    noProgress: true,
   });
-  const directUrl = String(out).trim().split('\n')[0];
-  if (!isUrl(directUrl)) throw new Error('yt-dlp không trả về link audio');
+  const file = String(out).trim().split('\n').pop();
+  if (!file || !fs.existsSync(file)) throw new Error('yt-dlp không tải được file audio');
+  song.file = file;
 
-  const res = await node.rest.resolve(directUrl);
+  const res = await node.rest.resolve(file);
   if (res?.loadType !== LoadType.TRACK) {
-    throw new Error(`Lavalink không mở được link từ yt-dlp (${res?.loadType}: ${res?.data?.message || ''})`);
+    dropFile(song);
+    throw new Error(`Lavalink không mở được file từ yt-dlp (${res?.loadType}: ${res?.data?.message || ''})`);
   }
   return res.data.encoded;
 }
@@ -205,6 +225,7 @@ function getQueue(guildId) {
 }
 
 async function destroyQueue(guildId) {
+  dropFile(queues.get(guildId)?.songs[0]);
   queues.delete(guildId);
   try {
     await shoukaku.leaveVoiceChannel(guildId);
@@ -256,7 +277,7 @@ function createQueue(guildId, player, textChannelId) {
     }
 
     // Bài phát xong, bị skip hoặc lỗi hẳn -> phát bài tiếp theo
-    queue.songs.shift();
+    dropFile(queue.songs.shift());
     void playNext(guildId).catch((e) => console.error('playNext error:', e));
   });
 
@@ -300,7 +321,7 @@ async function playNext(guildId, { announce = true } = {}) {
     console.error(`Không phát được "${song.title}":`, detail);
     if (queues.get(guildId) !== queue) return;
     await sendToQueueChannel(queue, `❌ Không phát được **${song.title}**, bỏ qua.`);
-    queue.songs.shift();
+    dropFile(queue.songs.shift());
     return playNext(guildId);
   }
 
@@ -488,7 +509,6 @@ async function handleInteraction(interaction) {
     if (!queue) {
       return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
     }
-    queue.songs = [];
     await destroyQueue(guild.id);
     return interaction.reply('⏹️ Đã dừng nhạc và rời kênh thoại.');
   }

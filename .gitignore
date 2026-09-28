@@ -23,3 +23,6 @@ files.zip
 lavalink/*.jar
 lavalink/plugins/
 lavalink/logs/
+
+# File audio yt-dlp tải tạm để Lavalink phát
+cache/

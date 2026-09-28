@@ -24,11 +24,14 @@ Nên bot chạy kiểu lai:
 
 1. Tìm bài / lấy playlist bằng Lavalink. Hỏng thì quay về yt-dlp + yt-search.
 2. Phát bằng Lavalink. Nếu Lavalink báo `loadFailed` với bài YouTube, bot tự
-   chuyển bài đó sang **yt-dlp (có cookies)**: yt-dlp chỉ lấy link audio
-   trực tiếp (`googlevideo.com/...`), rồi đưa link đó cho Lavalink phát qua
-   nguồn `http`.
-3. Link `googlevideo` gắn với IP đã xin nó, nên **Lavalink phải chạy cùng máy
-   với bot**.
+   chuyển bài đó sang **yt-dlp (có cookies)**: yt-dlp tải file audio về
+   `~/bot/cache/`, rồi Lavalink phát file đó qua nguồn `local`. Phát xong bot
+   xoá file; khởi động lại bot thì xoá sạch thư mục.
+3. Vì đọc file trên ổ đĩa, **Lavalink phải chạy cùng máy, cùng user với bot**.
+
+Vì sao không đưa thẳng link `googlevideo.com/...` cho Lavalink: đã thử, YouTube
+trả `403` vì Lavalink không gửi kèm header/token như yt-dlp (log Lavalink:
+`That URL is not playable` → `Status code 403`).
 
 Trên EC2, đặt `YT_VIA_YTDLP=1` trong `.env` để bỏ luôn bước thử Lavalink với
 YouTube — đằng nào cũng hỏng, bỏ qua thì bài bắt đầu nhanh hơn vài giây.
@@ -44,7 +47,10 @@ sudo apt install -y openjdk-21-jre-headless
 
 `t3.micro` chỉ có ~911 MiB RAM, trước đây đã dùng ~461 MiB. Lavalink với
 `-Xmx384m` ăn thêm ~450–550 MiB → **phải có swap**, không thì OOM killer sẽ
-giết bot:
+giết bot.
+
+Máy dựng theo [02-cai-dat-tu-dau.md](02-cai-dat-tu-dau.md) **đã có swap 2 GB**
+từ bước B2 — chạy `free -h`, thấy `Swap: 2.0Gi` thì bỏ qua. Chỉ khi chưa có:
 
 ```bash
 sudo fallocate -l 2G /swapfile

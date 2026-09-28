@@ -119,8 +119,13 @@ Lavalink 4.2.2 (client Node: `shoukaku` 4). Gỡ `@discordjs/voice`,
 
 - `/filter` áp ngay lên bài đang phát, không phát lại từ đầu
 - `/play` nhận thêm link SoundCloud, Bandcamp, Twitch, Vimeo
-- YouTube bị chặn thì tự chuyển sang yt-dlp + cookies lấy link audio, rồi
-  Lavalink phát link đó qua nguồn HTTP
+- YouTube bị chặn thì tự chuyển sang yt-dlp + cookies tải file audio, rồi
+  Lavalink phát file đó qua nguồn `local`
 
-Đã kiểm tra local: tìm kiếm, video, playlist 120 bài và link từ yt-dlp đều
-nạp được qua Lavalink. Chi tiết: [07-lavalink.md](07-lavalink.md).
+Bản đầu đưa link `googlevideo` cho Lavalink phát qua nguồn HTTP. Trên máy nhà
+chạy được, nhưng trên EC2 YouTube trả `403` cho Lavalink dù link đúng IP máy
+chủ — yt-dlp tải được vì gửi đúng header/token. Đổi sang tải file.
+
+Cookies cũ lại chết (file bị yt-dlp ghi đè lúc 16:41, còn 1588 byte). Export
+lại, lần này giữ `cookies.master.txt` chmod 400. Chi tiết:
+[07-lavalink.md](07-lavalink.md).

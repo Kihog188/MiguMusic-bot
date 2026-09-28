@@ -20,8 +20,8 @@ lavalink:
       twitch: true
       vimeo: true
       nico: false
-      http: true # bắt buộc: bot đưa link audio lấy từ yt-dlp cho Lavalink qua nguồn này
-      local: false
+      http: true
+      local: true # bắt buộc: bot tải audio YouTube bằng yt-dlp rồi đưa file cho Lavalink phát
     filters:
       volume: true
       equalizer: true
