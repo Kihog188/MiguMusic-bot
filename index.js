@@ -283,8 +283,55 @@ function getQueue(guildId) {
   return queues.get(guildId);
 }
 
+// Tự rời kênh: hết bài quá IDLE_LEAVE_MINUTES phút, hoặc kênh không còn ai quá EMPTY_LEAVE_MINUTES phút
+const IDLE_LEAVE_MS = Number(process.env.IDLE_LEAVE_MINUTES || 3) * 60_000;
+const EMPTY_LEAVE_MS = Number(process.env.EMPTY_LEAVE_MINUTES || 3) * 60_000;
+
+function clearTimer(queue, name) {
+  if (!queue?.[name]) return;
+  clearTimeout(queue[name]);
+  queue[name] = null;
+}
+
+function scheduleLeave(guildId, queue, name, ms, message) {
+  if (queue[name]) return;
+  queue[name] = setTimeout(async () => {
+    queue[name] = null;
+    if (queues.get(guildId) !== queue) return;
+    await sendToQueueChannel(queue, message);
+    await destroyQueue(guildId);
+  }, ms);
+}
+
+// Kênh của bot không còn người (bot khác không tính) -> tạm dừng và hẹn giờ rời.
+// Có người quay lại trước khi hết giờ -> huỷ hẹn và phát tiếp.
+function checkEmptyChannel(guild) {
+  const queue = queues.get(guild.id);
+  const channel = guild.members.me?.voice?.channel;
+  if (!queue || !channel) return;
+
+  const humans = channel.members.filter((m) => !m.user.bot).size;
+  if (humans === 0) {
+    if (queue.emptyTimer) return;
+    if (queue.playing && !queue.player.paused) {
+      queue.pausedForEmpty = true;
+      void queue.player.setPaused(true).catch(() => {});
+    }
+    scheduleLeave(guild.id, queue, 'emptyTimer', EMPTY_LEAVE_MS, '🥺 Không còn ai, Migu về nha~');
+  } else if (queue.emptyTimer) {
+    clearTimer(queue, 'emptyTimer');
+    if (queue.pausedForEmpty) {
+      queue.pausedForEmpty = false;
+      void queue.player.setPaused(false).catch(() => {});
+    }
+  }
+}
+
 async function destroyQueue(guildId) {
-  dropFile(queues.get(guildId)?.songs[0]);
+  const queue = queues.get(guildId);
+  clearTimer(queue, 'idleTimer');
+  clearTimer(queue, 'emptyTimer');
+  dropFile(queue?.songs[0]);
   queues.delete(guildId);
   try {
     await shoukaku.leaveVoiceChannel(guildId);
@@ -365,10 +412,12 @@ async function playNext(guildId, { announce = true } = {}) {
   const song = queue.songs[0];
   if (!song) {
     queue.playing = false;
-    // Không còn bài nào -> để bot đứng yên trong kênh thoại (không tự leave)
+    // Không còn bài nào -> chờ thêm bài một lúc rồi tự rời kênh
+    scheduleLeave(guildId, queue, 'idleTimer', IDLE_LEAVE_MS, '🎶 Hết nhạc rồi, Migu về nha~ ♪');
     return;
   }
   queue.playing = true;
+  clearTimer(queue, 'idleTimer');
 
   try {
     const encoded = await encodeSong(queue.player.node, song);
@@ -378,20 +427,26 @@ async function playNext(guildId, { announce = true } = {}) {
     const detail = (err?.stderr || '').trim().split('\n').pop() || err?.message || err;
     console.error(`Không phát được "${song.title}":`, detail);
     if (queues.get(guildId) !== queue) return;
-    await sendToQueueChannel(queue, `❌ Không phát được **${song.title}**, bỏ qua.`);
+    await sendToQueueChannel(queue, `😵 Migu hát không được **${song.title}**, qua bài khác nha~`);
     dropFile(queue.songs.shift());
     return playNext(guildId);
   }
 
-  if (announce) await sendToQueueChannel(queue, `🎶 Đang phát: **${song.title}**`);
+  if (announce) await sendToQueueChannel(queue, `🎤 Migu đang hát: **${song.title}** ♪`);
 }
 
-// Bot bị kick / bị ngắt khỏi kênh thoại -> dọn hàng đợi
 client.on('voiceStateUpdate', (oldState, newState) => {
-  if (newState.id !== client.user?.id) return;
-  if (oldState.channelId && !newState.channelId && queues.has(newState.guild.id)) {
-    void destroyQueue(newState.guild.id);
+  const guild = newState.guild;
+  const queue = queues.get(guild.id);
+  if (!queue) return;
+
+  // Bot rời kênh mà hàng đợi vẫn còn -> không phải /stop, /leave hay tự rời, tức là bị kick
+  if (newState.id === client.user?.id && oldState.channelId && !newState.channelId) {
+    void sendToQueueChannel(queue, '😢 Migu bị ngắt khỏi kênh rồi...');
+    void destroyQueue(guild.id);
+    return;
   }
+  checkEmptyChannel(guild);
 });
 
 // use the non-deprecated clientReady event in newer discord.js
@@ -467,7 +522,7 @@ client.on('interactionCreate', async (interaction) => {
     console.error('Lỗi xử lý lệnh:', err);
     try {
       if (interaction.isRepliable()) {
-        const msg = '❌ Có lỗi xảy ra khi xử lý lệnh.';
+        const msg = '😵 Ối, Migu bị lỗi rồi... thử lại nha~';
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply(msg);
         } else {
@@ -488,14 +543,14 @@ async function handleInteraction(interaction) {
   const guild = interaction.guild;
   const member = interaction.member;
 
-  if (!guild) return interaction.reply({ content: '⚠️ Lệnh này chỉ dùng trong server (guild).', flags: MessageFlags.Ephemeral });
+  if (!guild) return interaction.reply({ content: '⚠️ Lệnh này chỉ dùng trong server thôi nha~', flags: MessageFlags.Ephemeral });
 
   if (commandName === 'play') {
     const input = interaction.options.getString('link');
     const voiceChannel = member?.voice?.channel;
 
     if (!voiceChannel) {
-      return interaction.reply({ content: '⚠️ Bạn cần vào một kênh thoại trước đã!', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '⚠️ Vào kênh thoại trước đã nha~', flags: MessageFlags.Ephemeral });
     }
 
     await interaction.deferReply();
@@ -508,11 +563,11 @@ async function handleInteraction(interaction) {
       playlistTitle = result.playlistTitle;
     } catch (err) {
       console.error(err);
-      return interaction.editReply('❌ Không lấy được thông tin bài hát này. Kiểm tra lại link nhé.');
+      return interaction.editReply('😵 Migu không mở được link này, kiểm tra lại nha~');
     }
 
     if (!songs || songs.length === 0) {
-      return interaction.editReply('❌ Không tìm thấy bài hát nào phù hợp.');
+      return interaction.editReply('🔍 Migu không tìm thấy bài nào hết~');
     }
 
     let queue = getQueue(guild.id);
@@ -529,7 +584,7 @@ async function handleInteraction(interaction) {
       } catch (err) {
         console.error('Không vào được kênh thoại:', err?.message || err);
         await destroyQueue(guild.id);
-        return interaction.editReply('❌ Không thể kết nối vào kênh thoại.');
+        return interaction.editReply('😢 Migu không vào được kênh thoại...');
       }
 
       queue = createQueue(guild.id, player, interaction.channelId);
@@ -543,56 +598,56 @@ async function handleInteraction(interaction) {
     // Thông báo tuỳ theo thêm playlist hay 1 bài
     if (songs.length > 1) {
       return interaction.editReply(
-        `✅ Đã thêm **${songs.length}** bài từ playlist${playlistTitle ? ` **${playlistTitle}**` : ''} vào hàng đợi.` +
-        (wasIdle ? `\n▶️ Bắt đầu phát: **${songs[0].title}**` : ''),
+        `📃 Migu thêm **${songs.length}** bài${playlistTitle ? ` từ **${playlistTitle}**` : ''} rồi nè~` +
+        (wasIdle ? `\n🎤 Hát bài đầu: **${songs[0].title}** ♪` : ''),
       );
     }
     if (wasIdle) {
-      return interaction.editReply(`✅ Đã thêm và bắt đầu phát: **${songs[0].title}**`);
+      return interaction.editReply(`🎤 Migu hát liền: **${songs[0].title}** ♪`);
     }
-    return interaction.editReply(`➕ Đã thêm vào hàng đợi: **${songs[0].title}** (vị trí ${queue.songs.length})`);
+    return interaction.editReply(`➕ Migu thêm **${songs[0].title}** vào hàng đợi (#${queue.songs.length}) nha~`);
   }
 
   if (commandName === 'skip') {
     const queue = getQueue(guild.id);
     if (!queue || !queue.playing) {
-      return interaction.reply({ content: 'Hiện không có bài nào đang phát.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không hát bài nào~', flags: MessageFlags.Ephemeral });
     }
     await queue.player.stopTrack(); // sẽ trigger 'end' (stopped) -> tự phát bài tiếp theo
-    return interaction.reply('⏭️ Đã bỏ qua bài hát.');
+    return interaction.reply('⏭️ Qua bài tiếp nè~');
   }
 
   if (commandName === 'stop') {
     const queue = getQueue(guild.id);
     if (!queue) {
-      return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không ở trong kênh thoại~', flags: MessageFlags.Ephemeral });
     }
     await destroyQueue(guild.id);
-    return interaction.reply('⏹️ Đã dừng nhạc và rời kênh thoại.');
+    return interaction.reply('👋 39~ Hẹn gặp lại! 🥬');
   }
 
   if (commandName === 'pause') {
     const queue = getQueue(guild.id);
     if (!queue || !queue.playing) {
-      return interaction.reply({ content: 'Không có bài nào đang phát.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không hát bài nào~', flags: MessageFlags.Ephemeral });
     }
     await queue.player.setPaused(true);
-    return interaction.reply('⏸️ Đã tạm dừng.');
+    return interaction.reply('⏸️ Migu nghỉ chút~');
   }
 
   if (commandName === 'resume') {
     const queue = getQueue(guild.id);
     if (!queue) {
-      return interaction.reply({ content: 'Không có bài nào đang chờ.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không ở trong kênh thoại~', flags: MessageFlags.Ephemeral });
     }
     await queue.player.setPaused(false);
-    return interaction.reply('▶️ Tiếp tục phát.');
+    return interaction.reply('▶️ Hát tiếp nè ♪');
   }
 
   if (commandName === 'queue') {
     const queue = getQueue(guild.id);
     if (!queue || queue.songs.length === 0) {
-      return interaction.reply('Hàng đợi đang trống.');
+      return interaction.reply('📭 Hàng đợi trống trơn~');
     }
 
     let page = 0;
@@ -613,7 +668,7 @@ async function handleInteraction(interaction) {
 
     collector.on('collect', async (i) => {
       if (i.user.id !== interaction.user.id) {
-        return i.reply({ content: 'Chỉ người gọi lệnh mới bấm được nút này.', flags: MessageFlags.Ephemeral });
+        return i.reply({ content: '🙅 Nút này của người gọi lệnh thôi nha~', flags: MessageFlags.Ephemeral });
       }
       const totalPages = Math.max(1, Math.ceil(queue.songs.length / QUEUE_PAGE_SIZE));
       if (i.customId === 'queue_next') page += 1;
@@ -641,20 +696,20 @@ async function handleInteraction(interaction) {
   if (commandName === 'nowplaying') {
     const queue = getQueue(guild.id);
     if (!queue || !queue.playing || !queue.songs[0]) {
-      return interaction.reply({ content: 'Hiện không có bài nào đang phát.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không hát bài nào~', flags: MessageFlags.Ephemeral });
     }
     const fx = queue.filter && queue.filter !== 'off' ? ` (hiệu ứng: ${queue.filter})` : '';
-    return interaction.reply(`🎶 Đang phát: **${queue.songs[0].title}**${fx}`);
+    return interaction.reply(`🎤 Migu đang hát: **${queue.songs[0].title}** ♪${fx}`);
   }
 
   if (commandName === 'filter') {
     const queue = getQueue(guild.id);
     if (!queue) {
-      return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không ở trong kênh thoại~', flags: MessageFlags.Ephemeral });
     }
     const choice = interaction.options.getString('loai');
     if (!(choice in FILTERS)) {
-      return interaction.reply({ content: 'Hiệu ứng không hợp lệ.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '😵 Hiệu ứng lạ quá~', flags: MessageFlags.Ephemeral });
     }
 
     // Filter gắn với player nên tự áp cho cả các bài sau, không cần phát lại bài hiện tại
@@ -662,37 +717,37 @@ async function handleInteraction(interaction) {
     else await queue.player.setFilters(FILTERS[choice]);
     queue.filter = choice;
 
-    const label = choice === 'off' ? 'Tắt hiệu ứng' : choice;
-    return interaction.reply(`🎛️ Đã đổi hiệu ứng: **${label}**`);
+    const label = choice === 'off' ? 'giọng gốc' : choice;
+    return interaction.reply(`🎛️ Migu đổi giọng: **${label}** ♪`);
   }
 
   if (commandName === 'playnext') {
     const queue = getQueue(guild.id);
     if (!queue || queue.songs.length === 0) {
-      return interaction.reply({ content: 'Hàng đợi đang trống.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '📭 Hàng đợi trống trơn~', flags: MessageFlags.Ephemeral });
     }
     // Vị trí 0 là bài đang phát; chỉ chọn được từ 1 trở đi
     const n = interaction.options.getInteger('so');
     const maxN = queue.songs.length - 1;
     if (maxN < 1) {
-      return interaction.reply({ content: 'Hàng đợi chưa có bài nào đứng sau để chọn.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '📭 Chưa có bài nào phía sau để chọn~', flags: MessageFlags.Ephemeral });
     }
     if (n < 1 || n > maxN) {
-      return interaction.reply({ content: `Số không hợp lệ. Chọn từ 1 đến ${maxN} (xem số bằng /queue).`, flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: `🔢 Chọn số từ 1 đến ${maxN} nha (xem /queue)~`, flags: MessageFlags.Ephemeral });
     }
     // Lấy bài ở vị trí n, chèn lên ngay sau bài đang phát (vị trí 1)
     const [picked] = queue.songs.splice(n, 1);
     queue.songs.splice(1, 0, picked);
-    return interaction.reply(`⏫ Sẽ phát kế tiếp: **${picked.title}**`);
+    return interaction.reply(`⏫ Bài sau Migu hát **${picked.title}** nha~`);
   }
 
   if (commandName === 'leave') {
     const queue = getQueue(guild.id);
     if (!queue) {
-      return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '🎶 Migu đang không ở trong kênh thoại~', flags: MessageFlags.Ephemeral });
     }
     await destroyQueue(guild.id);
-    return interaction.reply('👋 Đã rời kênh thoại.');
+    return interaction.reply('👋 39~ Hẹn gặp lại! 🥬');
   }
 }
 
