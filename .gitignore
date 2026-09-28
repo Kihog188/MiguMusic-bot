@@ -26,3 +26,6 @@ lavalink/logs/
 
 # File audio yt-dlp tải tạm để Lavalink phát
 cache/
+
+# Tài liệu vận hành — chỉ giữ ở máy, không đưa lên GitHub
+docs/
