@@ -1,5 +1,6 @@
 // deploy-commands.js
 // Chạy file này MỖI KHI bạn thêm/sửa lệnh mới: node deploy-commands.js
+// Thêm --global để đăng ký toàn cục (hiện trên hồ sơ bot): node deploy-commands.js --global
 require('dotenv').config();
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
@@ -72,7 +73,16 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     console.log('Đang đăng ký slash commands...');
 
-    if (process.env.GUILD_ID) {
+    if (process.argv.includes('--global')) {
+      // Đăng ký toàn cục -> lệnh hiện trên hồ sơ bot, dùng được ở mọi server (mất tới 1 giờ)
+      await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+      console.log('Đã đăng ký lệnh toàn cục thành công!');
+      if (process.env.GUILD_ID) {
+        // Xoá bản đăng ký riêng của server test, nếu không lệnh sẽ hiện 2 lần ở server đó
+        await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: [] });
+        console.log('Đã xoá lệnh riêng của server test (tránh bị trùng).');
+      }
+    } else if (process.env.GUILD_ID) {
       // Đăng ký cho 1 server cụ thể -> cập nhật gần như ngay lập tức (dùng để test)
       await rest.put(
         Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
