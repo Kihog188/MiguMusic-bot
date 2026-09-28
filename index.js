@@ -59,7 +59,9 @@ shoukaku.on('error', (name, err) => console.error(`Lỗi Lavalink "${name}":`, e
 shoukaku.on('close', (name, code, reason) => console.warn(`Mất kết nối Lavalink "${name}" (${code}) ${reason || ''}`));
 
 // Lưu trữ hàng đợi (queue) cho mỗi server (guild), key = guildId
-// queue = { player, songs: [{title, url, encoded?}], textChannelId, playing, filter }
+// queue = { player, songs: [{title, url, encoded?, query?}], textChannelId, playing, filter }
+// - encoded: track Lavalink đã có sẵn (YouTube/SoundCloud tìm qua Lavalink)
+// - query: bài Spotify, từ khoá để tìm bản tương ứng trên YouTube lúc phát
 const queues = new Map();
 
 function isYoutubeUrl(text) {
@@ -161,9 +163,44 @@ async function resolveTracksYtdlp(input) {
   return { songs: [{ title: info.title, url: info.webpage_url || input }], playlistTitle: null };
 }
 
-// Trả về { songs: [{title,url,encoded?}], playlistTitle }. Luôn là mảng (1 hoặc nhiều bài).
+const SPOTIFY_URL = /^https?:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?(track|album|playlist)\/([A-Za-z0-9]+)/i;
+
+// Spotify không cho tải nhạc, chỉ lấy tên bài + nghệ sĩ từ trang nhúng công khai
+// (không cần tài khoản developer), rồi lúc phát sẽ tìm bản tương ứng trên YouTube.
+async function resolveSpotify(url) {
+  const [, type, id] = url.match(SPOTIFY_URL);
+  const res = await fetch(`https://open.spotify.com/embed/${type.toLowerCase()}/${id}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  });
+  if (!res.ok) throw new Error(`Spotify trả về ${res.status}`);
+  const html = await res.text();
+  const json = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.+?)<\/script>/s)?.[1];
+  const entity = json && JSON.parse(json).props?.pageProps?.state?.data?.entity;
+  if (!entity) throw new Error('Không đọc được dữ liệu trang Spotify');
+
+  const toSong = (name, artists, trackUrl) => ({
+    title: artists ? `${artists} - ${name}` : name,
+    url: trackUrl,
+    query: `${artists} ${name} audio`.trim(),
+  });
+
+  if (type.toLowerCase() === 'track') {
+    const artists = (entity.artists || []).map((a) => a.name).join(', ');
+    return { songs: [toSong(entity.name, artists, url)], playlistTitle: null };
+  }
+
+  const songs = (entity.trackList || [])
+    .filter((t) => t.title && t.isPlayable !== false)
+    .slice(0, 100) // giới hạn 100 bài
+    .map((t) => toSong(t.title, t.subtitle, `https://open.spotify.com/track/${t.uri.split(':').pop()}`));
+  return { songs, playlistTitle: entity.name || 'Spotify' };
+}
+
+// Trả về { songs: [{title,url,encoded?,query?}], playlistTitle }. Luôn là mảng (1 hoặc nhiều bài).
 async function resolveTracks(input) {
   const text = input.trim();
+  if (SPOTIFY_URL.test(text)) return resolveSpotify(text);
+
   const identifier = isUrl(text) ? text : `ytsearch:${text}`;
 
   let res;
@@ -195,11 +232,19 @@ function dropFile(song) {
   song.file = null;
 }
 
+// Thứ yt-dlp tải được cho bài này: link YouTube, hoặc từ khoá tìm trên YouTube (bài Spotify).
+// null = bài từ nguồn khác (SoundCloud...), chỉ Lavalink phát được.
+function ytdlpTarget(song) {
+  if (isYoutubeUrl(song.url)) return song.url;
+  if (song.query) return `ytsearch1:${song.query}`;
+  return null;
+}
+
 // yt-dlp (có cookies) tự tải audio YouTube về ổ đĩa, rồi Lavalink phát file đó.
 // Không đưa link googlevideo cho Lavalink được: YouTube trả 403 vì Lavalink không gửi
 // kèm header/token như yt-dlp.
 async function encodeViaYtdlp(node, song) {
-  const out = await ytdlp(song.url, {
+  const out = await ytdlp(ytdlpTarget(song), {
     ...YTDLP_BASE,
     format: 'bestaudio[ext=webm]/bestaudio',
     output: path.join(AUDIO_DIR, `${Date.now()}-%(id)s.%(ext)s`),
@@ -218,6 +263,20 @@ async function encodeViaYtdlp(node, song) {
     throw new Error(`Lavalink không mở được file từ yt-dlp (${res?.loadType}: ${res?.data?.message || ''})`);
   }
   return res.data.encoded;
+}
+
+// Chọn đường phát cho một bài, trả về track `encoded` để đưa cho Lavalink
+async function encodeSong(node, song) {
+  const target = ytdlpTarget(song);
+  if (target && (song.viaYtdlp || FORCE_YTDLP || (!song.encoded && !song.query))) {
+    return encodeViaYtdlp(node, song);
+  }
+  if (song.encoded) return song.encoded;
+
+  // Bài Spotify: để Lavalink tìm bản tương ứng trên YouTube, không được thì nhờ yt-dlp
+  const res = await node.rest.resolve(`ytsearch:${song.query}`);
+  if (res?.loadType === LoadType.SEARCH && res.data.length) return res.data[0].encoded;
+  return encodeViaYtdlp(node, song);
 }
 
 function getQueue(guildId) {
@@ -269,7 +328,7 @@ function createQueue(guildId, player, textChannelId) {
 
     const song = queue.songs[0];
     // Lavalink tự lấy YouTube thất bại (thường do bị chặn IP) -> thử lại bài này qua yt-dlp
-    if (event.reason === 'loadFailed' && song && !song.viaYtdlp && isYoutubeUrl(song.url)) {
+    if (event.reason === 'loadFailed' && song && !song.viaYtdlp && ytdlpTarget(song)) {
       console.warn(`Lavalink không phát được "${song.title}", chuyển sang yt-dlp.`);
       song.viaYtdlp = true;
       void playNext(guildId, { announce: false }).catch((e) => console.error('playNext error:', e));
@@ -312,8 +371,7 @@ async function playNext(guildId, { announce = true } = {}) {
   queue.playing = true;
 
   try {
-    const useYtdlp = !song.encoded || song.viaYtdlp || (FORCE_YTDLP && isYoutubeUrl(song.url));
-    const encoded = useYtdlp ? await encodeViaYtdlp(queue.player.node, song) : song.encoded;
+    const encoded = await encodeSong(queue.player.node, song);
     if (queues.get(guildId) !== queue) return; // bị /stop hoặc /leave trong lúc chờ yt-dlp
     await queue.player.playTrack({ track: { encoded } });
   } catch (err) {

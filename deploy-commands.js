@@ -6,10 +6,10 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 const commands = [
   new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Phát nhạc từ link YouTube (hoặc từ khoá tìm kiếm)')
+    .setDescription('Phát nhạc từ link YouTube, Spotify, SoundCloud hoặc từ khoá tìm kiếm')
     .addStringOption(option =>
       option.setName('link')
-        .setDescription('Link YouTube hoặc từ khoá tìm bài hát')
+        .setDescription('Link YouTube / Spotify / SoundCloud hoặc từ khoá tìm bài hát')
         .setRequired(true)),
 
   new SlashCommandBuilder()
