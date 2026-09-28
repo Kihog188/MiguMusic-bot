@@ -47,7 +47,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('filter')
-    .setDescription('Đổi hiệu ứng âm thanh (bassboost, nightcore, 8D...)')
+    .setDescription('Đổi hiệu ứng âm thanh (bassboost, nightcore, 8D...) — áp dụng ngay')
     .addStringOption(option =>
       option.setName('loai')
         .setDescription('Loại hiệu ứng')

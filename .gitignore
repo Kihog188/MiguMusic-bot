@@ -18,3 +18,8 @@ files.zip
 # Khoá SSH — bí mật
 *.pem
 *.key
+
+# Lavalink — tự tải về, không đưa lên repo
+lavalink/*.jar
+lavalink/plugins/
+lavalink/logs/

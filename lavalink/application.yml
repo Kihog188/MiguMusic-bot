@@ -1,0 +1,68 @@
+# Cấu hình Lavalink 4 cho bot. Đặt Lavalink.jar cạnh file này rồi chạy:
+#   java -Xmx384m -jar Lavalink.jar
+# Chi tiết: docs/07-lavalink.md
+server:
+  port: 2333
+  address: 127.0.0.1 # chỉ bot trên cùng máy được kết nối, không mở ra Internet
+
+lavalink:
+  plugins:
+    # Nguồn YouTube của Lavalink (nguồn tích hợp sẵn đã ngừng bảo trì)
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+      snapshot: false
+  server:
+    # Phải trùng LAVALINK_PASSWORD trong .env của bot
+    password: "${LAVALINK_PASSWORD:youshallnotpass}"
+    sources:
+      youtube: false # đã thay bằng plugin ở trên
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      nico: false
+      http: true # bắt buộc: bot đưa link audio lấy từ yt-dlp cho Lavalink qua nguồn này
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    opusEncodingQuality: 10
+    resamplingQuality: LOW
+    trackStuckThresholdMs: 10000
+    useSeekGhosting: true
+    youtubePlaylistLoadLimit: 6 # 6 trang x 100 bài
+    playerUpdateInterval: 5
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED
+
+logging:
+  file:
+    path: ./logs/
+  level:
+    root: INFO
+    lavalink: INFO
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7

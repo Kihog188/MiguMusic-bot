@@ -1,7 +1,7 @@
 {
   "name": "discord-music-bot",
   "version": "1.0.0",
-  "description": "Bot Discord nghe nhạc từ link YouTube",
+  "description": "Bot Discord nghe nhạc (Lavalink)",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -9,20 +9,13 @@
     "deploy": "node deploy-commands.js"
   },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
-    "@discordjs/voice": "^0.19.2",
-    "@distube/ytdl-core": "^4.14.4",
-    "@noble/ciphers": "^2.4.0",
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
-    "ffmpeg-static": "^5.2.0",
-    "libsodium-wrappers": "^0.7.13",
-    "opusscript": "^0.0.8",
+    "shoukaku": "^4.3.0",
     "youtube-dl-exec": "^3.1.15",
     "yt-search": "^2.13.1"
   },
   "allowScripts": {
-    "ffmpeg-static": true,
     "youtube-dl-exec": true
   }
 }

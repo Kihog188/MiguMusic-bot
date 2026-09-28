@@ -14,6 +14,7 @@ nhiều tháng mà vẫn hiểu được.
 | [04-do-hieu-nang.md](04-do-hieu-nang.md) | Số liệu đo thật, dùng để quyết định nâng cấp |
 | [05-van-hanh.md](05-van-hanh.md) | Lệnh dùng hằng ngày, xử lý sự cố |
 | [06-nhat-ky.md](06-nhat-ky.md) | Nhật ký thay đổi theo thời gian |
+| [07-lavalink.md](07-lavalink.md) | Lavalink: vì sao dùng, cách cài, cách chạy chung với yt-dlp |
 
 ## Tra cứu nhanh
 
@@ -23,6 +24,7 @@ ssh -i D:\BOT\BOT\zam-bot-key.pem ubuntu@<IP>
 
 # Xem log truc tiep
 journalctl -u zam-bot -f
+journalctl -u lavalink -f
 
 # Khoi dong lai
 sudo systemctl restart zam-bot

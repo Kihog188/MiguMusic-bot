@@ -107,3 +107,20 @@ Sửa ở commit **`6383347`**, đổi sang ký tự đại diện:
 ### Tạo thư mục `docs/`
 
 Chính là thư mục bạn đang đọc.
+
+---
+
+## 28/09/2026 — Chuyển sang Lavalink
+
+Bỏ đường yt-dlp → ffmpeg → opusscript trong Node, giao phần phát nhạc cho
+Lavalink 4.2.2 (client Node: `shoukaku` 4). Gỡ `@discordjs/voice`,
+`@discordjs/opus`, `ffmpeg-static`, `libsodium-wrappers`, `opusscript`,
+`@noble/ciphers`, `@distube/ytdl-core`.
+
+- `/filter` áp ngay lên bài đang phát, không phát lại từ đầu
+- `/play` nhận thêm link SoundCloud, Bandcamp, Twitch, Vimeo
+- YouTube bị chặn thì tự chuyển sang yt-dlp + cookies lấy link audio, rồi
+  Lavalink phát link đó qua nguồn HTTP
+
+Đã kiểm tra local: tìm kiếm, video, playlist 120 bài và link từ yt-dlp đều
+nạp được qua Lavalink. Chi tiết: [07-lavalink.md](07-lavalink.md).

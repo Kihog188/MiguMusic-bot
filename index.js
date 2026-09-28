@@ -10,28 +10,19 @@ const {
   ButtonStyle,
   ComponentType,
 } = require('discord.js');
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  VoiceConnectionStatus,
-  entersState,
-  StreamType,
-} = require('@discordjs/voice');
+const { Shoukaku, Connectors, LoadType } = require('shoukaku');
 const ytdlp = require('youtube-dl-exec');
 const ytSearch = require('yt-search');
-const { spawn } = require('child_process');
-const ffmpegPath = require('ffmpeg-static');
 
-// Các bộ lọc âm thanh (tham số -af của ffmpeg). key = giá trị chọn trong lệnh /filter
+// Các bộ lọc âm thanh của Lavalink. key = giá trị chọn trong lệnh /filter.
+// Lavalink áp filter trực tiếp lên bài đang phát, không cần phát lại từ đầu.
 const FILTERS = {
-  off: null,
-  bassboost: 'bass=g=12',
-  nightcore: 'asetrate=48000*1.25,aresample=48000',
-  '8d': 'apulsator=hz=0.09',
-  treble: 'treble=g=8',
-  vaporwave: 'asetrate=48000*0.8,aresample=48000',
+  off: {},
+  bassboost: { equalizer: [0, 1, 2, 3].map((band) => ({ band, gain: 0.3 })) },
+  nightcore: { timescale: { rate: 1.25 } },
+  '8d': { rotation: { rotationHz: 0.09 } },
+  treble: { equalizer: [10, 11, 12, 13, 14].map((band) => ({ band, gain: 0.25 })) },
+  vaporwave: { timescale: { rate: 0.8 } },
 };
 
 const client = new Client({
@@ -42,43 +33,44 @@ const client = new Client({
   ],
 });
 
+// Lavalink chạy cạnh bot (xem lavalink/application.yml). Mặc định nghe ở 127.0.0.1:2333.
+const shoukaku = new Shoukaku(
+  new Connectors.DiscordJS(client),
+  [{
+    name: 'main',
+    url: process.env.LAVALINK_URL || '127.0.0.1:2333',
+    auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+  }],
+  // Lavalink khởi động lại (JVM) mất vài chục giây -> thử kết nối lại mãi, đừng bỏ cuộc
+  { reconnectTries: Infinity, reconnectInterval: 5 },
+);
+
+shoukaku.on('ready', (name, lavalinkResume) => {
+  console.log(`Lavalink "${name}" đã sẵn sàng.`);
+  // Lavalink vừa khởi động lại -> mọi player cũ trên node này đã mất, dọn hàng đợi
+  if (lavalinkResume) return;
+  for (const [guildId, queue] of queues) {
+    if (queue.player.node.name === name) void destroyQueue(guildId);
+  }
+});
+shoukaku.on('error', (name, err) => console.error(`Lỗi Lavalink "${name}":`, err?.message || err));
+shoukaku.on('close', (name, code, reason) => console.warn(`Mất kết nối Lavalink "${name}" (${code}) ${reason || ''}`));
+
 // Lưu trữ hàng đợi (queue) cho mỗi server (guild), key = guildId
-// queue = { connection, player, songs: [{title, url}], textChannel, playing: bool }
+// queue = { player, songs: [{title, url, encoded?}], textChannelId, playing, filter }
 const queues = new Map();
-
-function safeDestroy(connection) {
-  try {
-    if (!connection) return;
-    const status = connection.state?.status;
-    if (status !== VoiceConnectionStatus.Destroyed) {
-      connection.destroy();
-    }
-  } catch (err) {
-    // ignore errors when destroying an already-destroyed connection
-  }
-}
-
-// Kill một cặp tiến trình (yt-dlp + ffmpeg) cụ thể
-function killProcs(proc, ffmpeg) {
-  for (const p of [proc, ffmpeg]) {
-    try {
-      if (p && !p.killed) p.kill('SIGKILL');
-    } catch (err) {
-      // ignore
-    }
-  }
-}
-
-function killProcess(queue) {
-  if (!queue) return;
-  killProcs(queue.currentProcess, queue.currentFfmpeg);
-  queue.currentProcess = null;
-  queue.currentFfmpeg = null;
-}
 
 function isYoutubeUrl(text) {
   return /^https?:\/\/(www\.|music\.|m\.)?(youtube\.com|youtu\.be)\//i.test((text || '').trim());
 }
+
+function isUrl(text) {
+  return /^https?:\/\//i.test((text || '').trim());
+}
+
+// Trên máy chủ cloud, YouTube chặn Lavalink (IP datacenter) nhưng yt-dlp có cookies vẫn qua.
+// Đặt YT_VIA_YTDLP=1 để bỏ qua bước thử Lavalink với YouTube, đi thẳng yt-dlp cho nhanh.
+const FORCE_YTDLP = process.env.YT_VIA_YTDLP === '1';
 
 // Tuỳ chọn chung cho mọi lần gọi yt-dlp.
 // - jsRuntimes: dùng Node có sẵn để giải n-challenge của YouTube (không có sẽ bị 403 khi tải)
@@ -90,21 +82,30 @@ const YTDLP_BASE = {
   ...(process.env.YTDL_COOKIES ? { cookies: process.env.YTDL_COOKIES } : {}),
 };
 
-// Tìm bài hát từ từ khoá nếu không phải link
-async function resolveSong(input) {
-  if (isYoutubeUrl(input)) {
-    const info = await ytdlp(input, {
-      ...YTDLP_BASE,
-      dumpSingleJson: true,
-      noPlaylist: true,
-      skipDownload: true,
-    });
-    return { title: info.title, url: info.webpage_url || input };
-  } else {
-    const result = await ytSearch(input);
-    const video = result.videos[0];
-    if (!video) return null;
-    return { title: video.title, url: video.url };
+function getNode() {
+  const node = shoukaku.getIdealNode();
+  if (!node) throw new Error('Lavalink chưa sẵn sàng');
+  return node;
+}
+
+function trackToSong(track) {
+  return { title: track.info.title, url: track.info.uri, encoded: track.encoded };
+}
+
+// Đổi kết quả loadtracks của Lavalink thành { songs, playlistTitle }, hoặc null nếu không có gì
+function lavalinkToSongs(res) {
+  switch (res?.loadType) {
+    case LoadType.TRACK:
+      return { songs: [trackToSong(res.data)], playlistTitle: null };
+    case LoadType.SEARCH:
+      return res.data.length ? { songs: [trackToSong(res.data[0])], playlistTitle: null } : null;
+    case LoadType.PLAYLIST:
+      return {
+        songs: res.data.tracks.slice(0, 100).map(trackToSong), // giới hạn 100 bài
+        playlistTitle: res.data.info.name || 'Playlist',
+      };
+    default:
+      return null;
   }
 }
 
@@ -113,10 +114,16 @@ function isPlaylistUrl(text) {
   return /[?&]list=/.test((text || '').trim());
 }
 
-// Trả về { songs: [{title,url}], playlistTitle }. Luôn là mảng (1 hoặc nhiều bài).
-async function resolveTracks(input) {
-  // Nếu là link playlist -> lấy toàn bộ danh sách (flat playlist cho nhanh)
-  if (isYoutubeUrl(input) && isPlaylistUrl(input)) {
+// Đường dự phòng khi Lavalink không lấy được thông tin YouTube: yt-dlp (link) / yt-search (từ khoá).
+// Bài lấy theo đường này không có `encoded`, lúc phát sẽ đi qua yt-dlp.
+async function resolveTracksYtdlp(input) {
+  if (!isYoutubeUrl(input)) {
+    const result = await ytSearch(input);
+    const video = result.videos[0];
+    return { songs: video ? [{ title: video.title, url: video.url }] : [], playlistTitle: null };
+  }
+
+  if (isPlaylistUrl(input)) {
     try {
       const info = await ytdlp(input, {
         ...YTDLP_BASE,
@@ -127,7 +134,7 @@ async function resolveTracks(input) {
       const entries = Array.isArray(info?.entries) ? info.entries : [];
       const songs = entries
         .filter((e) => e && e.id && e.title && !/^\[(Deleted|Private|Unavailable)/i.test(e.title))
-        .slice(0, 100) // giới hạn 100 bài để tránh playlist quá lớn
+        .slice(0, 100)
         .map((e) => ({
           title: e.title,
           url: e.url && /^https?:/.test(e.url)
@@ -143,61 +150,135 @@ async function resolveTracks(input) {
     }
   }
 
-  // Video đơn hoặc từ khoá tìm kiếm
-  const song = await resolveSong(input);
-  return { songs: song ? [song] : [], playlistTitle: null };
+  const info = await ytdlp(input, {
+    ...YTDLP_BASE,
+    dumpSingleJson: true,
+    noPlaylist: true,
+    skipDownload: true,
+  });
+  return { songs: [{ title: info.title, url: info.webpage_url || input }], playlistTitle: null };
+}
+
+// Trả về { songs: [{title,url,encoded?}], playlistTitle }. Luôn là mảng (1 hoặc nhiều bài).
+async function resolveTracks(input) {
+  const text = input.trim();
+  const identifier = isUrl(text) ? text : `ytsearch:${text}`;
+
+  let res;
+  try {
+    res = await getNode().rest.resolve(identifier);
+  } catch (err) {
+    console.error('Lavalink không tìm được bài:', err?.message || err);
+  }
+  const found = lavalinkToSongs(res);
+  if (found) return found;
+
+  if (res?.loadType === LoadType.ERROR) {
+    console.warn(`Lavalink báo lỗi với "${text}":`, res.data?.message);
+  }
+  // Link không phải YouTube (SoundCloud...) thì yt-dlp cũng không giúp gì
+  if (isUrl(text) && !isYoutubeUrl(text)) return { songs: [], playlistTitle: null };
+  return resolveTracksYtdlp(text);
+}
+
+// yt-dlp (có cookies) lấy link audio trực tiếp của YouTube, rồi đưa link đó cho Lavalink
+// phát qua nguồn HTTP. Link googlevideo gắn với IP nên Lavalink phải chạy cùng máy với bot.
+async function encodeViaYtdlp(node, song) {
+  const out = await ytdlp(song.url, {
+    ...YTDLP_BASE,
+    getUrl: true,
+    format: 'bestaudio[ext=webm]/bestaudio',
+    noPlaylist: true,
+  });
+  const directUrl = String(out).trim().split('\n')[0];
+  if (!isUrl(directUrl)) throw new Error('yt-dlp không trả về link audio');
+
+  const res = await node.rest.resolve(directUrl);
+  if (res?.loadType !== LoadType.TRACK) {
+    throw new Error(`Lavalink không mở được link từ yt-dlp (${res?.loadType}: ${res?.data?.message || ''})`);
+  }
+  return res.data.encoded;
 }
 
 function getQueue(guildId) {
   return queues.get(guildId);
 }
 
-function createQueue(guildId, connection, textChannelId) {
-  const player = createAudioPlayer();
+async function destroyQueue(guildId) {
+  queues.delete(guildId);
+  try {
+    await shoukaku.leaveVoiceChannel(guildId);
+  } catch (err) {
+    // kết nối có thể đã bị huỷ từ trước — bỏ qua
+  }
+}
+
+async function sendToQueueChannel(queue, content) {
+  try {
+    let textChannel = client.channels.cache.get(queue.textChannelId);
+    if (!textChannel) {
+      textChannel = await client.channels.fetch(queue.textChannelId);
+    }
+    if (textChannel && typeof textChannel.send === 'function') {
+      await textChannel.send({
+        embeds: [new EmbedBuilder().setColor(0x1DB954).setDescription(content)],
+      });
+    } else {
+      console.warn('textChannel not sendable', queue.textChannelId);
+    }
+  } catch (err) {
+    console.error('Không thể gửi thông báo vào channel:', err);
+  }
+}
+
+function createQueue(guildId, player, textChannelId) {
   const queue = {
-    connection,
     player,
     songs: [],
     textChannelId,
     playing: false,
     filter: 'off',
-    currentProcess: null,
-    currentFfmpeg: null,
   };
   queues.set(guildId, queue);
 
-  connection.subscribe(player);
+  player.on('end', (event) => {
+    // replaced: bài bị thay bằng playTrack() khác; cleanup: player bị huỷ -> không làm gì
+    if (event.reason === 'replaced' || event.reason === 'cleanup') return;
+    if (queues.get(guildId) !== queue) return;
 
-  player.on(AudioPlayerStatus.Idle, () => {
-    // Bài trước phát xong (hoặc bị skip) -> dọn tiến trình cũ rồi phát bài tiếp theo
-    killProcess(queue);
+    const song = queue.songs[0];
+    // Lavalink tự lấy YouTube thất bại (thường do bị chặn IP) -> thử lại bài này qua yt-dlp
+    if (event.reason === 'loadFailed' && song && !song.viaYtdlp && isYoutubeUrl(song.url)) {
+      console.warn(`Lavalink không phát được "${song.title}", chuyển sang yt-dlp.`);
+      song.viaYtdlp = true;
+      void playNext(guildId, { announce: false }).catch((e) => console.error('playNext error:', e));
+      return;
+    }
+
+    // Bài phát xong, bị skip hoặc lỗi hẳn -> phát bài tiếp theo
     queue.songs.shift();
     void playNext(guildId).catch((e) => console.error('playNext error:', e));
   });
 
-  player.on('error', (error) => {
-    // Khi player lỗi, nó sẽ tự chuyển sang trạng thái Idle -> handler Idle ở trên
-    // sẽ lo việc shift() và phát bài tiếp theo. KHÔNG shift() ở đây để tránh
-    // bỏ qua nhầm 1 bài (double-shift).
-    console.error('Lỗi player:', error?.message || error);
+  player.on('exception', (event) => {
+    // Sau exception Lavalink sẽ gửi 'end' (loadFailed) -> handler ở trên lo phần còn lại
+    const ex = event.exception;
+    console.error(`Lỗi Lavalink khi phát "${queue.songs[0]?.title}":`, ex?.message, ex?.cause || '');
   });
 
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    try {
-      await Promise.race([
-        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-        entersState(connection, VoiceConnectionStatus.Connecting, 5000),
-      ]);
-    } catch {
-      safeDestroy(connection);
-      queues.delete(guildId);
-    }
+  player.on('stuck', () => {
+    console.warn(`Bài "${queue.songs[0]?.title}" bị kẹt, bỏ qua.`);
+    void player.stopTrack().catch(() => {});
+  });
+
+  player.on('closed', (event) => {
+    console.warn(`Kết nối thoại bị đóng (${event.code}) ${event.reason || ''}`);
   });
 
   return queue;
 }
 
-async function playNext(guildId) {
+async function playNext(guildId, { announce = true } = {}) {
   const queue = getQueue(guildId);
   if (!queue) return;
 
@@ -207,81 +288,32 @@ async function playNext(guildId) {
     // Không còn bài nào -> để bot đứng yên trong kênh thoại (không tự leave)
     return;
   }
-
-  // 1) yt-dlp xuất luồng audio gốc ra stdout
-  const ytProcess = ytdlp.exec(
-    song.url,
-    {
-      ...YTDLP_BASE,
-      output: '-',
-      format: 'bestaudio[ext=webm]/bestaudio',
-      quiet: true,
-      noPlaylist: true,
-    },
-    { stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  // Tránh unhandled rejection khi tiến trình bị kill (skip/stop). Nếu yt-dlp tự lỗi
-  // (403, video riêng tư, bị chặn IP...) thì in dòng lỗi cuối để không "im lặng".
-  ytProcess.catch((err) => {
-    if (err?.isTerminated || err?.signal) return;
-    const lastLine = (err?.stderr || '').trim().split('\n').pop();
-    console.error(`yt-dlp lỗi khi phát "${song.title}":`, lastLine || err?.shortMessage || err?.message);
-  });
-
-  // 2) ffmpeg nhận audio từ yt-dlp, áp bộ lọc (nếu có), xuất PCM 48kHz stereo.
-  //    @discordjs/voice (opusscript) sẽ tự encode Opus và căn nhịp 20ms chính xác
-  //    -> tránh lỗi phát nhanh/giật khi để ffmpeg tự đóng gói Ogg/Opus.
-  const filterArg = FILTERS[queue.filter] || null;
-  const ffmpegArgs = [
-    '-i', 'pipe:0',
-    ...(filterArg ? ['-af', filterArg] : []),
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    'pipe:1',
-  ];
-  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'ignore'] });
-
-  // Nối yt-dlp -> ffmpeg, nuốt lỗi EPIPE khi một bên bị kill
-  ytProcess.stdout.on('error', () => {});
-  ffmpeg.stdin.on('error', () => {});
-  ffmpeg.on('error', (err) => console.error('Lỗi ffmpeg:', err?.message || err));
-  ytProcess.stdout.pipe(ffmpeg.stdin);
-
-  // Lưu cả 2 tiến trình để kill khi /skip, /stop, /leave, /filter
-  queue.currentProcess = ytProcess;
-  queue.currentFfmpeg = ffmpeg;
-
-  const stream = ffmpeg.stdout;
-  stream.on('error', (err) => {
-    console.error(`Lỗi stream khi phát "${song.title}":`, err?.message || err);
-  });
-
-  const resource = createAudioResource(stream, { inputType: StreamType.Raw });
-  queue.player.play(resource);
   queue.playing = true;
 
-  // Lấy channel từ id để đảm bảo object hợp lệ và có trong cache
   try {
-    let textChannel = client.channels.cache.get(queue.textChannelId);
-    if (!textChannel) {
-      textChannel = await client.channels.fetch(queue.textChannelId);
-    }
-    if (textChannel && typeof textChannel.send === 'function') {
-      await textChannel.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x1DB954)
-            .setDescription(`🎶 Đang phát: **${song.title}**`),
-        ],
-      });
-    } else {
-      console.warn('playNext: textChannel not sendable', queue.textChannelId);
-    }
+    const useYtdlp = !song.encoded || song.viaYtdlp || (FORCE_YTDLP && isYoutubeUrl(song.url));
+    const encoded = useYtdlp ? await encodeViaYtdlp(queue.player.node, song) : song.encoded;
+    if (queues.get(guildId) !== queue) return; // bị /stop hoặc /leave trong lúc chờ yt-dlp
+    await queue.player.playTrack({ track: { encoded } });
   } catch (err) {
-    console.error('Không thể gửi thông báo vào channel:', err);
+    const detail = (err?.stderr || '').trim().split('\n').pop() || err?.message || err;
+    console.error(`Không phát được "${song.title}":`, detail);
+    if (queues.get(guildId) !== queue) return;
+    await sendToQueueChannel(queue, `❌ Không phát được **${song.title}**, bỏ qua.`);
+    queue.songs.shift();
+    return playNext(guildId);
   }
+
+  if (announce) await sendToQueueChannel(queue, `🎶 Đang phát: **${song.title}**`);
 }
+
+// Bot bị kick / bị ngắt khỏi kênh thoại -> dọn hàng đợi
+client.on('voiceStateUpdate', (oldState, newState) => {
+  if (newState.id !== client.user?.id) return;
+  if (oldState.channelId && !newState.channelId && queues.has(newState.guild.id)) {
+    void destroyQueue(newState.guild.id);
+  }
+});
 
 // use the non-deprecated clientReady event in newer discord.js
 client.once('clientReady', () => {
@@ -407,26 +439,27 @@ async function handleInteraction(interaction) {
     let queue = getQueue(guild.id);
 
     if (!queue) {
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: guild.id,
-        adapterCreator: guild.voiceAdapterCreator,
-      });
-
+      let player;
       try {
-        await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+        player = await shoukaku.joinVoiceChannel({
+          guildId: guild.id,
+          channelId: voiceChannel.id,
+          shardId: guild.shardId,
+          deaf: true,
+        });
       } catch (err) {
-        safeDestroy(connection);
+        console.error('Không vào được kênh thoại:', err?.message || err);
+        await destroyQueue(guild.id);
         return interaction.editReply('❌ Không thể kết nối vào kênh thoại.');
       }
 
-      queue = createQueue(guild.id, connection, interaction.channelId);
+      queue = createQueue(guild.id, player, interaction.channelId);
     }
 
     const wasIdle = !queue.playing;
     for (const s of songs) queue.songs.push(s);
 
-    if (wasIdle) playNext(guild.id);
+    if (wasIdle) void playNext(guild.id).catch((e) => console.error('playNext error:', e));
 
     // Thông báo tuỳ theo thêm playlist hay 1 bài
     if (songs.length > 1) {
@@ -446,7 +479,7 @@ async function handleInteraction(interaction) {
     if (!queue || !queue.playing) {
       return interaction.reply({ content: 'Hiện không có bài nào đang phát.', flags: MessageFlags.Ephemeral });
     }
-    queue.player.stop(); // sẽ trigger 'Idle' -> tự phát bài tiếp theo
+    await queue.player.stopTrack(); // sẽ trigger 'end' (stopped) -> tự phát bài tiếp theo
     return interaction.reply('⏭️ Đã bỏ qua bài hát.');
   }
 
@@ -456,10 +489,7 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
     }
     queue.songs = [];
-    killProcess(queue);
-    queue.player.stop();
-    safeDestroy(queue.connection);
-    queues.delete(guild.id);
+    await destroyQueue(guild.id);
     return interaction.reply('⏹️ Đã dừng nhạc và rời kênh thoại.');
   }
 
@@ -468,7 +498,7 @@ async function handleInteraction(interaction) {
     if (!queue || !queue.playing) {
       return interaction.reply({ content: 'Không có bài nào đang phát.', flags: MessageFlags.Ephemeral });
     }
-    queue.player.pause();
+    await queue.player.setPaused(true);
     return interaction.reply('⏸️ Đã tạm dừng.');
   }
 
@@ -477,7 +507,7 @@ async function handleInteraction(interaction) {
     if (!queue) {
       return interaction.reply({ content: 'Không có bài nào đang chờ.', flags: MessageFlags.Ephemeral });
     }
-    queue.player.unpause();
+    await queue.player.setPaused(false);
     return interaction.reply('▶️ Tiếp tục phát.');
   }
 
@@ -549,21 +579,13 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: 'Hiệu ứng không hợp lệ.', flags: MessageFlags.Ephemeral });
     }
 
+    // Filter gắn với player nên tự áp cho cả các bài sau, không cần phát lại bài hiện tại
+    if (choice === 'off') await queue.player.clearFilters();
+    else await queue.player.setFilters(FILTERS[choice]);
     queue.filter = choice;
-    const label = choice === 'off' ? 'Tắt hiệu ứng' : choice;
 
-    // Nếu đang phát -> phát lại bài hiện tại với hiệu ứng mới (bài sẽ bắt đầu lại từ đầu)
-    if (queue.playing && queue.songs[0]) {
-      // playNext() spawn yt-dlp + ffmpeg, có thể lâu hơn cửa sổ 3 giây của Discord
-      // -> phải báo nhận trước, nếu không interaction hết hạn (lỗi 10062)
-      await interaction.deferReply();
-      const oldYt = queue.currentProcess;
-      const oldFf = queue.currentFfmpeg;
-      await playNext(guild.id); // player.play() thay resource mới -> không kích hoạt shift
-      killProcs(oldYt, oldFf); // dọn tiến trình cũ sau khi đã chuyển sang resource mới
-      return interaction.editReply(`🎛️ Đã đổi hiệu ứng: **${label}** — phát lại bài hiện tại.`);
-    }
-    return interaction.reply(`🎛️ Đã đặt hiệu ứng: **${label}** — áp dụng cho bài kế tiếp.`);
+    const label = choice === 'off' ? 'Tắt hiệu ứng' : choice;
+    return interaction.reply(`🎛️ Đã đổi hiệu ứng: **${label}**`);
   }
 
   if (commandName === 'playnext') {
@@ -591,9 +613,7 @@ async function handleInteraction(interaction) {
     if (!queue) {
       return interaction.reply({ content: 'Bot không ở trong kênh thoại nào.', flags: MessageFlags.Ephemeral });
     }
-    killProcess(queue);
-    safeDestroy(queue.connection);
-    queues.delete(guild.id);
+    await destroyQueue(guild.id);
     return interaction.reply('👋 Đã rời kênh thoại.');
   }
 }
