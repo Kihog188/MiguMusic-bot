@@ -36,16 +36,27 @@ const client = new Client({
 });
 
 // Lavalink chạy cạnh bot (xem lavalink/application.yml). Mặc định nghe ở 127.0.0.1:2333.
+const LAVALINK_NODE = {
+  name: 'main',
+  url: process.env.LAVALINK_URL || '127.0.0.1:2333',
+  auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+};
 const shoukaku = new Shoukaku(
   new Connectors.DiscordJS(client),
-  [{
-    name: 'main',
-    url: process.env.LAVALINK_URL || '127.0.0.1:2333',
-    auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
-  }],
+  [LAVALINK_NODE],
   // Lavalink khởi động lại (JVM) mất vài chục giây -> thử kết nối lại mãi, đừng bỏ cuộc
   { reconnectTries: Infinity, reconnectInterval: 5 },
 );
+
+// Lỗi của shoukaku 4.3.0: thử lại thất bại vài lần rồi mới kết nối được thì nó vẫn coi là hỏng,
+// tự đóng kết nối và xoá node khỏi danh sách -> bot kẹt "Can't find any nodes" tới khi khởi động lại.
+// Kiểm tra định kỳ, node bị xoá thì thêm lại.
+setInterval(() => {
+  // trước khi client sẵn sàng thì shoukaku chưa tự thêm node, đừng chen vào
+  if (!client.isReady() || shoukaku.nodes.has(LAVALINK_NODE.name)) return;
+  console.warn(`Node Lavalink "${LAVALINK_NODE.name}" bị gỡ, thêm lại...`);
+  shoukaku.addNode(LAVALINK_NODE);
+}, 15_000).unref();
 
 shoukaku.on('ready', (name, lavalinkResume) => {
   console.log(`Lavalink "${name}" đã sẵn sàng.`);
