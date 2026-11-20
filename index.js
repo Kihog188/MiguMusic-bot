@@ -257,7 +257,8 @@ function ytdlpTarget(song) {
 async function encodeViaYtdlp(node, song) {
   const out = await ytdlp(ytdlpTarget(song), {
     ...YTDLP_BASE,
-    format: 'bestaudio[ext=webm]/bestaudio',
+    // YouTube đôi khi chỉ trả mỗi format 18 (mp4 có hình, SABR) -> lấy luôn bản đó thay vì báo lỗi
+    format: 'bestaudio[ext=webm]/bestaudio/best[acodec!=none]',
     output: path.join(AUDIO_DIR, `${Date.now()}-%(id)s.%(ext)s`),
     print: 'after_move:filepath',
     noSimulate: true,
