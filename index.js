@@ -370,6 +370,9 @@ async function sendToQueueChannel(queue, content) {
   }
 }
 
+// Mã của mỗi lượt phát, gửi kèm track để biết sự kiện 'end' thuộc về lượt nào
+let lastPlayId = 0;
+
 function createQueue(guildId, player, textChannelId) {
   const queue = {
     player,
@@ -386,8 +389,12 @@ function createQueue(guildId, player, textChannelId) {
     if (queues.get(guildId) !== queue) return;
 
     const song = queue.songs[0];
+    // 'end' đến muộn của bài đã /stop -> đừng đụng vào bài mới thêm
+    const playId = event.track?.userData?.playId;
+    if (!song || (playId !== undefined && playId !== song.playId)) return;
+
     // Lavalink tự lấy YouTube thất bại (thường do bị chặn IP) -> thử lại bài này qua yt-dlp
-    if (event.reason === 'loadFailed' && song && !song.viaYtdlp && ytdlpTarget(song)) {
+    if (event.reason === 'loadFailed' && !song.viaYtdlp && ytdlpTarget(song)) {
       console.warn(`Lavalink không phát được "${song.title}", chuyển sang yt-dlp.`);
       song.viaYtdlp = true;
       void playNext(guildId, { announce: false }).catch((e) => console.error('playNext error:', e));
@@ -433,18 +440,27 @@ async function playNext(guildId, { announce = true } = {}) {
 
   try {
     const encoded = await encodeSong(queue.player.node, song);
-    if (queues.get(guildId) !== queue) return; // bị /stop hoặc /leave trong lúc chờ yt-dlp
-    await queue.player.playTrack({ track: { encoded } });
+    // bị /stop hoặc /leave trong lúc chờ yt-dlp
+    if (queues.get(guildId) !== queue || queue.songs[0] !== song) {
+      dropFile(song);
+      return;
+    }
+    song.playId = ++lastPlayId;
+    await queue.player.playTrack({ track: { encoded, userData: { playId: song.playId } } });
   } catch (err) {
     const detail = (err?.stderr || '').trim().split('\n').pop() || err?.message || err;
     console.error(`Không phát được "${song.title}":`, detail);
-    if (queues.get(guildId) !== queue) return;
+    if (queues.get(guildId) !== queue || queue.songs[0] !== song) {
+      dropFile(song);
+      return;
+    }
     await sendToQueueChannel(queue, `😵 Migu hát không được **${song.title}**, qua bài khác nha~`);
+    if (queue.songs[0] !== song) return; // bị /stop trong lúc gửi thông báo
     dropFile(queue.songs.shift());
     return playNext(guildId);
   }
 
-  if (announce) await sendToQueueChannel(queue, `🎤 Migu đang hát: **${song.title}** ♪`);
+  if (announce && queue.songs[0] === song) await sendToQueueChannel(queue, `🎤 Migu đang hát: **${song.title}** ♪`);
 }
 
 client.on('voiceStateUpdate', (oldState, newState) => {
@@ -634,8 +650,17 @@ async function handleInteraction(interaction) {
     if (!queue) {
       return interaction.reply({ content: '🎶 Migu đang không ở trong kênh thoại~', flags: MessageFlags.Ephemeral });
     }
-    await destroyQueue(guild.id);
-    return interaction.reply('👋 39~ Hẹn gặp lại! 🥬');
+    if (!queue.playing) {
+      return interaction.reply({ content: '🎶 Migu đang không hát bài nào~', flags: MessageFlags.Ephemeral });
+    }
+    // Xoá hàng đợi trước khi dừng để 'end' không phát bài kế tiếp; bot vẫn ở lại kênh
+    const [stopped] = queue.songs.splice(0);
+    queue.pausedForEmpty = false;
+    void playNext(guild.id).catch((e) => console.error('playNext error:', e)); // hàng đợi trống -> hẹn giờ rời kênh
+    // Bỏ luôn trạng thái tạm dừng, không thì bài /play sau đó sẽ im lặng
+    await queue.player.update({ track: { encoded: null }, paused: false });
+    dropFile(stopped);
+    return interaction.reply('⏹️ Migu dừng hát và xoá hàng đợi rồi nha~');
   }
 
   if (commandName === 'pause') {
