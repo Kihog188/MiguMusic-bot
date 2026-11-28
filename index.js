@@ -684,11 +684,14 @@ async function showQueue(interaction, queue, ephemeral = false) {
     embeds: [first.embed],
     components: first.totalPages > 1 ? [first.row] : [],
     flags,
+    withResponse: true,
   });
 
   if (first.totalPages <= 1) return;
 
-  const collector = response.createMessageComponentCollector({
+  // Nghe nút trên chính tin hàng đợi vừa gửi. Đừng dùng collector của interaction: khi mở
+  // bằng nút 📃, discord.js lấy nhầm tin "Migu đang hát" (tin chứa nút 📃) để nghe.
+  const collector = response.resource.message.createMessageComponentCollector({
     componentType: ComponentType.Button,
     idle: 60000, // nút tự tắt sau 60 giây không dùng
   });
